@@ -75,10 +75,10 @@ class TaskStore:
         return self._db.execute(
             "SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
 
-    def get_owned(self, task_id: str, key_fp: str) -> dict[str, Any] | None:
-        """「不存在」与「非属主」合并返回 None（调用方一律 404）。"""
+    def get(self, task_id: str) -> dict[str, Any] | None:
+        """task_id 即凭据（UUID 不可猜）。"""
         row = self._get(task_id)
-        if row is None or row["key_fp"] != key_fp:
+        if row is None:
             return None
         return dict(row)
 
@@ -106,9 +106,9 @@ class TaskStore:
                              vals)
             self._db.commit()
 
-    def delete_finished(self, task_id: str, key_fp: str) -> bool:
+    def delete_finished(self, task_id: str) -> bool:
         row = self._get(task_id)
-        if row is None or row["key_fp"] != key_fp:
+        if row is None:
             return False
         if row["status"] not in ("succeeded", "failed"):
             return False

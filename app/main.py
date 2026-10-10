@@ -301,29 +301,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="dola-service", version="1.0.0", lifespan=lifespan)
 
     # ---- 账号选择（grok.1task.cn 式账号-IP 隔离）----
-    def _pick_account(request: Request):
-        prefer = (request.headers.get("x-account") or "").strip()
-        return registry.pick(prefer)
+    # ---- 🔴 鉴权 = Bearer sessionid 透传 ----
+    # new-api 渠道绑 dola 账号 sessionid 做 API key；
+    # Bearer token 即上游凭据，服务拆 Bearer → 建 client → 打上游。
+    _bearer_clients: dict[str, DolaClient] = {}
+    _bearer_lock = threading.Lock()
 
-    def _client_of(account_name: str) -> DolaClient:
-        a = registry.get(account_name)
-        if a is None:
-            raise InvalidParameterError(f"任务账号已不存在：{account_name}")
-        return a.client(registry.device_id, registry.web_id, nodes=registry.nodes)
-
-    # ---- 鉴权：Bearer 透传（对齐 jimeng/new-api 形态）----
-    # key 即调用方身份（HMAC 指纹 → 任务归属）；API_KEYS 非空时才做白名单校验。
     def _bearer(request: Request) -> str:
         auth = request.headers.get("authorization", "")
         if not auth.startswith("Bearer ") or not auth[7:].strip():
-            raise AuthError("缺少 Authorization: Bearer <key>")
-        key = auth[7:].strip()
-        if settings.auth_mode == "whitelist":
-            if key not in [k.strip() for k in settings.api_keys.split(",")]:
-                raise AuthError("无效 API key")
-        return key
+            raise AuthError("缺少 Authorization: Bearer <dola_sessionid>")
+        return auth[7:].strip()
+
+    def _client_for(request: Request) -> DolaClient:
+        token = _bearer(request)
+        return _client_for_bearer(token)
+
+    def _client_for_bearer(token: str) -> DolaClient:
+        with _bearer_lock:
+            cl = _bearer_clients.get(token)
+            if cl is None:
+                cookie = token  # 🔴 Bearer = 完整 cookie 串，直接透传
+                cl = DolaClient(cookie, device_id=settings.device_id,
+                                web_id=settings.web_id,
+                                proxy=settings.upstream_proxy or None)
+                _bearer_clients[token] = cl
+            return cl
 
     def _fp(request: Request) -> str:
+        return key_fingerprint(_bearer(request))
         return key_fingerprint(_bearer(request))
 
     @app.exception_handler(AdapterError)
@@ -457,7 +463,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/async/v1/images/generations/{task_id}")
     def images_status(task_id: str, request: Request = None) -> dict:  # type: ignore[assignment]
-        row = store.get_owned(task_id, _fp(request))
+        row = store.get(task_id)
         if row is None:
             raise HTTPException(status_code=404, detail="not found")
         out = {"task_id": task_id, "status": row["status"],
@@ -489,7 +495,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.delete("/async/v1/images/generations/{task_id}")
     def images_delete(task_id: str, request: Request = None) -> dict:  # type: ignore[assignment]
-        if not store.delete_finished(task_id, _fp(request)):
+        if not store.delete_finished(task_id):
             raise HTTPException(status_code=400,
                                 detail="不存在/非属主/非终态")
         return {"deleted": True}
@@ -522,7 +528,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v3/contents/generations/tasks/{task_id}")
     def video_status(task_id: str, request: Request = None) -> dict:  # type: ignore[assignment]
-        row = store.get_owned(task_id, _fp(request))
+        row = store.get(task_id)
         if row is None:
             raise HTTPException(status_code=404, detail="not found")
         status = {"queued": "queued", "running": "running",
@@ -535,7 +541,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if res["status"] == "succeeded":
                     store.update(task_id, status="succeeded",
                                  upstream=_video_payload(res["arts"][0]))
-                    row = store.get_owned(task_id, _fp(request))
+                    row = store.get(task_id)
                     status = "succeeded"
             except (AdapterError, DolaError):
                 pass
