@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip release]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve next version
+        id: ver
+        run: |
+          set -euo pipefail
+          PREV=$(git tag --list 'v*.*.*' --sort=-v:refname | head -n1 || true)
+          BASE=${PREV:-v0.0.0}
+          IFS=. read -r MA MI PA <<< "${BASE#v}"
+          NEW="v${MA}.${MI}.$((PA + 1))"
+          echo "prev=${PREV}" >> "$GITHUB_OUTPUT"
+          echo "next=${NEW}" >> "$GITHUB_OUTPUT"
+          echo "Previous: ${PREV:-<none>} -> Next: ${NEW}"
+
+      - name: Build changelog
+        id: log
+        run: |
+          set -euo pipefail
+          PREV='${{ steps.ver.outputs.prev }}'
+          if [ -z "$PREV" ]; then
+            RANGE=HEAD
+            { echo 'body<<CHANGELOG_EOF'; echo '## Initial release'; git log HEAD --pretty='- %s (%h)' --no-merges --max-count=30; echo 'CHANGELOG_EOF'; } >> "$GITHUB_OUTPUT"
+          else
+            RANGE="${PREV}..HEAD"
+            { echo 'body<<CHANGELOG_EOF'; echo '## Changes'; git log "$RANGE" --pretty='- %s (%h)' --no-merges; echo 'CHANGELOG_EOF'; } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run tests
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install fastapi httpx pydantic pytest
+          python -m pytest tests/ -q
+
+      - name: Create tag
+        run: |
+          set -euo pipefail
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git tag -a '${{ steps.ver.outputs.next }}' -m 'Release ${{ steps.ver.outputs.next }}'
+          git push origin '${{ steps.ver.outputs.next }}'
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create '${{ steps.ver.outputs.next }}' \
+            --title '${{ steps.ver.outputs.next }}' \
+            --notes-file <(echo '${{ steps.log.outputs.body }}')
