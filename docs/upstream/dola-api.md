@@ -336,6 +336,14 @@ from:"shark_admin"}`（带加密 detail blob）→ **要求滑块验证**。实�
 
 **上传链 4/4（6 步）全通**。完整实现见 §10 upload.py。`/alice/upload/auth_token` 为死端点（scene 全扫 710010202），受理走 `resource/prepare_upload`。
 
+### 11.1 全能参考（音频/视频生视频）盲测结论：❌ 不支持
+
+- mp4 经 `resource_type=1`（服务 `u8dpqn1f20`）**上传成功**（prepare→apply→TOS→Commit 全 200），
+  但 attachment 消息（`type=2` + `video.uri`）发送后 **bot 完全忽略附件**（仅回显提示词，不生成不提示）；
+- dola web 创作页**不支持上传音频/视频**作为参考（无入口）；type 枚举无 web 参照可校准；
+- mp4 图片服务（uo7y4d541q）finish 报 **4028 Invalid File Type**（UriStatus 2001 未提交）——图片服务拒视频。
+- ⇒ **图生视频仅支持图片参考**（attachment type=1 已验证）；视频/音频参考在 dola web 协议面不可用。
+
 ⚠️ 注意：`/alice/upload/auth_token` 是**死端点**（页面签名调用 scene 全扫也是 710010202），上传受理走的是 `resource/prepare_upload`。
 💡 短路结论：**引用 dola 已有图做图生图不需要上传链**——`ext.ref_images` 直接填已生成图的 TOS key。
 
