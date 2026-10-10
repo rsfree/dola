@@ -18,6 +18,7 @@ import json
 import os
 import threading
 import time
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -36,10 +37,15 @@ class Account:
     dead: bool = False
     dead_reason: str = ""
     dead_at: float = 0.0
+    #: 🔴 额度耗尽态（"满额换号"）：到点自动恢复（dola 额度按自然日刷新）
+    exhausted_until: float = 0.0
     inflight: int = 0
     total_ok: int = 0
     total_fail: int = 0
     _client: DolaClient | None = field(default=None, repr=False)
+
+    def is_available(self) -> bool:
+        return not self.dead and time.time() >= self.exhausted_until
 
     def client(self, device_id: str = "", web_id: str = "",
                nodes=None) -> DolaClient:
@@ -105,9 +111,14 @@ class AccountRegistry:
                 node_id=e.get("node"))
 
     # ---- 调度 ----
-    def pick(self, prefer: str = "") -> Account:
-        """选账号：显式点名 > 健康者轮询。点名账号已死 ⇒ 明确报错（不静默换号，
-        任务亲和性优先——换号会看不到原会话）。"""
+    def pick(self, prefer: str = "", *, for_generation: bool = False) -> Account:
+        """选账号：显式点名 > 可用者轮询。
+
+        - for_generation=True（生成类请求）：额外跳过额度耗尽的账号；
+          若全部耗尽/失效 ⇒ 报"账号池全部失效"。
+        - 点名语义：优先用点名账号；仅当它**额度耗尽**且 for_generation=True
+          时才换号（满额换号）；dead/deleted 点名仍明确报错。
+        """
         with self._lock:
             if prefer:
                 a = self._accounts.get(prefer)
@@ -116,14 +127,33 @@ class AccountRegistry:
                 if a.dead:
                     raise InvalidParameterError(
                         f"账号 {prefer} 已失效（{a.dead_reason or 'auth'}），请更换 cookie")
+                if (for_generation and time.time() < a.exhausted_until):
+                    others = [x for x in self._accounts.values()
+                              if x.is_available() and x.name != prefer]
+                    if not others:
+                        raise InvalidParameterError(
+                            f"账号 {prefer} 额度耗尽且无其他可用账号")
+                    others.sort(key=lambda x: x.name)
+                    return others[0]
                 return a
-            names = [n for n, a in self._accounts.items() if not a.dead]
-            if not names:
+            avail = [a for a in self._accounts.values() if a.is_available()]
+            if not avail:
                 raise InvalidParameterError("账号池全部失效，请补充 cookie")
-            names.sort()
-            a = self._accounts[names[self._rr % len(names)]]
+            avail.sort(key=lambda x: x.name)
+            a = avail[self._rr % len(avail)]
             self._rr += 1
             return a
+
+    def mark_exhausted(self, name: str) -> None:
+        """额度耗尽：标记到下一个自然日（Asia/Shanghai 零点）自动恢复。"""
+        import datetime as _dt
+        with self._lock:
+            a = self._accounts.get(name)
+            if a:
+                now = _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=8)))
+                tomorrow = (now + _dt.timedelta(days=1)).replace(
+                    hour=0, minute=0, second=0, microsecond=0)
+                a.exhausted_until = tomorrow.timestamp()
 
     def get(self, name: str) -> Account | None:
         return self._accounts.get(name)
@@ -154,5 +184,7 @@ class AccountRegistry:
             out = []
             for a in sorted(self._accounts.values(), key=lambda x: x.name):
                 n = self.nodes.get(a.node_id) if (self.nodes and a.node_id is not None) else None
-                out.append(a.snapshot(node_name=n.name if n else ""))
+                snap = a.snapshot(node_name=n.name if n else "")
+                snap["exhausted_until"] = a.exhausted_until
+                out.append(snap)
             return out

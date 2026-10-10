@@ -79,13 +79,38 @@ class ArkVideoRequest(BaseModel):
 
 # ---------------------------------------------------------------- 发送内核
 def _submit(ac_client: DolaClient, signer: SignerClient, *, prompt: str,
-            skill: int, ability_param: dict) -> tuple[str, str]:
+            skill: int, ability_param: dict,
+            ref_attachment_uri: str | None = None) -> tuple[str, str]:
     """铸签 → 发送 → 返回 (conversation_id, 首帧信号)。
 
     风控 710022004 ⇒ 作废缓存重铸一次（重试语义：只重试一次，风控重试加剧）。
     """
     body = build_completion_body(prompt=prompt, skill_type=skill,
                                  ability_param=ability_param)
+    if ref_attachment_uri:
+        # 🔴 图生图契约（用户浏览器实抓 2026-10-10）：附件消息(block_type 10052)
+        #    与文本消息并列两条；文本自带技能前缀
+        prefix = "生成图片：" if skill == 3 else "生成视频："
+        att = {"local_message_id": str(uuid.uuid1()),
+               "content_block": [{"block_type": 10052,
+               "content": {"attachment_block": {"attachments": [{"type": 1,
+                   "identifier": str(uuid.uuid1()),
+                   "image": {"name": "reference.jpg", "uri": ref_attachment_uri,
+                             "image_ori": {"url": "", "width": 0, "height": 0,
+                                           "format": "", "url_formats": {}},
+                             "parse_state": 0, "review_state": 1,
+                             "upload_status": 1, "progress": 100, "src": ""}}]},
+                           "pc_event_block": ""},
+               "block_id": str(uuid.uuid4()), "parent_id": "",
+               "meta_info": [], "append_fields": []}],
+               "message_status": 0}
+        base_msgs = body["messages"] or [{"local_message_id": str(uuid.uuid1()),
+                                          "content_block": [], "message_status": 0}]
+        txt = dict(base_msgs[0])
+        tb = txt.get("content_block") or []
+        if tb and (tb[0].get("content", {}).get("text_block")):
+            tb[0]["content"]["text_block"]["text"] = f"{prefix}{prompt}"
+        body["messages"] = [att, txt]
     body_str = json.dumps(body, ensure_ascii=False)
     base_url = f"{ac_client._url('/chat/completion')}"
     try:
@@ -158,6 +183,75 @@ def _poll(client: DolaClient, conv_id: str, kind: str, *,
                 raise QuotaExceeded(t.strip())
         time.sleep(interval)
     return {"status": "timeout", "arts": [], "texts": last_texts}
+
+
+def _generation_with_failover(registry: AccountRegistry, store: TaskStore,
+                              signer: SignerClient, settings: Settings, lock,
+                              *, task_id: str, kind: str, prompt: str,
+                              model_key: str, prefer: str = "",
+                              ability_extra: dict | None = None,
+                              ref_attachment_uri: str | None = None) -> None:
+    """生成任务 + 🔴 满额换号：QuotaExceeded ⇒ 标记账号到次日 ⇒ 换下一个健康账号重试。"""
+    from .errors import QuotaExceeded as _QE
+    from .upstream.dola.send_body import SKILL_IMAGE, SKILL_VIDEO
+    skill = 3 if kind == "image" else 17
+    tried: set[str] = set()
+    quota_err: str | None = None
+    attempts = 0
+    while attempts < 8:
+        acct = registry.pick(prefer=prefer, for_generation=True)
+        if acct.name in tried:
+            break
+        tried.add(acct.name)
+        attempts += 1
+        ac_client = _client_of_local(registry, acct)
+        try:
+            ap = dict(ability_extra or {})
+            with lock:
+                conv_id, _ = _submit(ac_client, signer, prompt=prompt,
+                                     skill=skill, ability_param=ap or None,
+                                     ref_attachment_uri=ref_attachment_uri)
+            store.update(task_id, conv_id=conv_id, status="running",
+                         account=acct.name)
+            res = _poll(ac_client, conv_id, kind,
+                        timeout=(settings.image_poll_timeout if kind == "image"
+                                 else settings.video_poll_timeout),
+                        interval=settings.poll_interval)
+            registry.mark_ok(acct.name)
+            if res["status"] == "succeeded":
+                if kind == "image":
+                    store.update(task_id, status="succeeded",
+                                 upstream={"data": _images_payload(res["arts"])})
+                else:
+                    store.update(task_id, status="succeeded",
+                                 upstream=_video_payload(res["arts"][0]))
+                return
+            store.update(task_id, status="failed", error="timeout")
+            return
+        except _QE as e:
+            # 🔴 满额换号：额度打满 ⇒ 标记到次日 ⇒ 换号重试
+            registry.mark_exhausted(acct.name)
+            quota_err = str(e)
+            continue
+        except UpstreamAuthError as e:
+            registry.mark_dead(acct.name, "712012001 cookie 失效")
+            store.update(task_id, status="failed", error=str(e))
+            return
+        except AdapterError as e:
+            registry.mark_fail(acct.name)
+            store.update(task_id, status="failed", error=str(e))
+            return
+        except Exception as e:
+            store.update(task_id, status="failed", error=f"internal: {e}")
+            return
+    store.update(task_id, status="failed",
+                 error=quota_err or "无可用账号（全部额度耗尽/失效）",
+                 upstream={"code": "all_accounts_exhausted"})
+
+
+def _client_of_local(registry: AccountRegistry, acct) -> DolaClient:
+    return acct.client(registry.device_id, registry.web_id,
+                       nodes=registry.nodes)
 
 
 def _images_payload(arts) -> list[dict[str, Any]]:
@@ -404,6 +498,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/v3/contents/generations/tasks")
     def video_create(req: ArkVideoRequest, request: Request = None) -> dict:  # type: ignore[assignment]
         fp = _fp(request)
+        req_header_account = (request.headers.get("x-account") or "").strip() if request else ""
         acct = _pick_account(request)
         reg = VIDEO_MODELS.get(req.model)
         if not reg:
@@ -415,34 +510,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
               "input_box_content": {"user_input_content": req.prompt,
                                     "reply_message_format": "生成视频：%s"}}
         def _run() -> None:
-            try:
-                ac_client = _client_of(acct.name)
-                with lock:
-                    conv_id, _ = _submit(ac_client, signer, prompt=req.prompt,
-                                         skill=reg["skill"], ability_param=ap)
-                store.update(task_id, conv_id=conv_id, status="running")
-                res = _poll(ac_client, conv_id, "video",
-                            timeout=settings.video_poll_timeout,
-                            interval=settings.poll_interval)
-                if res["status"] == "succeeded":
-                    store.update(task_id, status="succeeded",
-                                 upstream=_video_payload(res["arts"][0]))
-                else:
-                    store.update(task_id, status="failed", error="timeout")
-            except QuotaExceeded as e:
-                registry.mark_ok(acct.name)  # 额度错=链路通，账号健康
-                store.update(task_id, status="failed",
-                             error=str(e), upstream={"code": "quota_exceeded"})
-            except UpstreamAuthError:
-                registry.mark_dead(acct.name, "712012001 cookie 失效")
-                store.update(task_id, status="failed", error="account auth failed")
-            except AdapterError as e:
-                registry.mark_fail(acct.name)
-                store.update(task_id, status="failed", error=str(e))
-            except Exception as e:
-                store.update(task_id, status="failed", error=f"internal: {e}")
+            # 🔴 满额换号：QuotaExceeded ⇒ 标记到次日 ⇒ 自动换下一个账号重试
+            _generation_with_failover(registry, store, signer, settings, lock,
+                                      task_id=task_id, kind="video",
+                                      prompt=req.prompt, model_key=req.model,
+                                      prefer=req_header_account,
+                                      ability_extra=ap)
         threading.Thread(target=_run, daemon=True).start()
-        return {"id": task_id, "model": req.model, "status": "queued"}
+        return {"id": task_id, "model": req.model, "status": "queued",
+                "account": acct.name}
 
     @app.get("/api/v3/contents/generations/tasks/{task_id}")
     def video_status(task_id: str, request: Request = None) -> dict:  # type: ignore[assignment]
