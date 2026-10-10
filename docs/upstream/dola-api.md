@@ -300,7 +300,8 @@ from:"shark_admin"}`（带加密 detail blob）→ **要求滑块验证**。实�
 |---|---|---|
 | 1 | ~~a_bogus / msToken 逆向~~ | ✅ **已排除**：网关不强制（无凭据 POST 到达业务层报 login invalid）；监控动态开启 |
 | 2 | ~~视频发送体实抓~~ | ✅ **已实弹**：浏览器 fetch 钩子拿到真身（§3），轮询+无水印下载全链纯 HTTP 闭环 |
-| 2b | 图像发送的 ability_param（图像技能发送实抓） | ❓ 按视频同构推断（input_box_content 同构）；纯 HTTP 实发被风控拦在 2b 之前，待浏览器钩子实抓 |
+| 2b | 图像发送的 ability_param（图像技能发送实抓） | ✅ 纯 HTTP 实发验证：`{"input_box_content":{user_input_content,reply_message_format},"ratio":"16:9"}` → 4×2732×1534（比例生效） |
+| 2d | **图生图（ref_images）** | ✅ 已打通：**不需要上传链**——顶层 `ext.ref_images` = JSON 字符串 `[{"image_token":"<dola已生成图的TOS key>","refer_types":"overall","identifier":"<本地id>"}]` + `ext.is_quote="1"` + `ext.quote_type="Image"`，同账号引用已生成图实测 4 张成功（输出构图由服务端定）。外部本地图上传链 3/4 段已通（§11），差 part 上传格式 |
 | 2c | ~~纯 HTTP 写路径的风控穿透~~ | ✅ **已打通**：a_bogus 是 shark 唯一关键（§4.0.1）。剩余工程：把"浏览器铸签（mock 拦截）→ 纯 HTTP 发送"封装成自动流程，并测 a_bogus TTL |
 | 6 | SSE 事件完整 schema | ✅ 已活体抓全：SSE_HEARTBEAT / SSE_ACK / FULL_MSG_NOTIFY / DOWNLINK_CMD(310) / STREAM_MSG_NOTIFY / STREAM_CHUNK(patch_op) / STREAM_ERROR / FIN |
 | 3 | 上传链路（/alice/upload/auth_token → file → image_token） | ❓ 未走查；v1 适配器建议只收 image_token/资产 key |
@@ -319,6 +320,20 @@ from:"shark_admin"}`（带加密 detail blob）→ **要求滑块验证**。实�
 - `chain_image_full.json` —— 图像生成会话消息链（图像任务卡 ×4）
 - `negctl/` —— 无凭据负对照原始响应
 - `dola_probe.py` —— 统一 CLI：`conversations` / `chain <id>` / `send-dry-run` / `negctl`
+
+## 11. 上传链（外部图片 → image_token，图生图前置）
+
+抓包来源：用户 DevTools 三段 curl（2026-10-10）。纯 HTTP 复刻 **3/4 段通**：
+
+| 段 | 请求 | 状态 |
+|---|---|---|
+| ① 受理 | `POST /alice/resource/prepare_upload` body `{"tenant_id":"5","scene_id":"4","resource_type":2}`（走粘性代理过地理门，**无需 a_bogus**） | ✅ 返回全明文 STS（ak+sk+session_token，1h）+ service_id=`uo7y4d541q`（与 jimeng 同一 ImageX 服务）+ upload_host |
+| ② Apply | `GET https://imagex-ap-southeast-1.bytevcloudapi.com/?Action=ApplyImageUpload&Version=2018-08-01&ServiceId=...&FileSize=&FileExtension=` AWS4 签名（region=`us-east-1`，service=`imagex`，SignedHeaders 仅 `x-amz-date;x-amz-security-token`；jimeng upload.py 签名器直接复用） | ✅ StoreInfos(Auth=SpaceKey JWT) + SessionKey |
+| ③ init | `POST {UploadHosts[0]}/upload/v1/{StoreUri}?uploadmode=part&phase=init`，头 `Authorization=<SpaceKey>` + `X-Storage-U=<uid>` | ✅ uploadid |
+| ④ part | `phase=upload` 的方法/参数形态 | ❓ 7 种变体全 4004——上传 SDK 独立懒加载块，需真实选文件才加载（浏览器扩展开"允许访问文件 URL"后可抓） |
+
+⚠️ 注意：`/alice/upload/auth_token` 是**死端点**（页面签名调用 scene 全扫也是 710010202），上传受理走的是 `resource/prepare_upload`。
+💡 短路结论：**引用 dola 已有图做图生图不需要上传链**——`ext.ref_images` 直接填已生成图的 TOS key。
 
 ## 10. 代码产物（app/upstream/dola/）
 
