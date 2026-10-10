@@ -42,12 +42,11 @@ def test_missing_bearer_is_401_even_in_passthrough(tmp_path):
     assert c.get("/async/v1/images/generations").status_code == 401
 
 
-def test_whitelist_mode_rejects_unknown_key(tmp_path):
-    c = _client(str(tmp_path / "c.sqlite3"), "good-key")
+def test_bearer_passthrough_accepts_any_format(tmp_path):
+    """Bearer = cookie 串透传，任意非空值即身份（new-api 渠道绑 sessionid/全量 cookie）。"""
+    c = _client(str(tmp_path / "c.sqlite3"), None)
     assert c.get("/async/v1/images/generations",
-                 headers={"Authorization": "Bearer good-key"}).status_code == 200
-    assert c.get("/async/v1/images/generations",
-                 headers={"Authorization": "Bearer bad-key"}).status_code == 401
+                 headers={"Authorization": "Bearer anything"}).status_code == 200
 
 
 def test_models_and_healthz_are_public(tmp_path):
