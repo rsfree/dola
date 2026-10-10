@@ -1,0 +1,12 @@
+[
+  {
+    "id": 2,
+    "name": "livetest-per-account-2090",
+    "proxy": "socks5h://poolclient-{账号}:<PASSWORD>@gw.example.com:2090"
+  },
+  {
+    "id": 3,
+    "name": "static-sg-01",
+    "proxy": "http://user:pass@5.6.7.8:3128"
+  }
+]

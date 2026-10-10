@@ -1,0 +1,21 @@
+services:
+  dola-signer:
+    build: ./signer
+    environment:
+      - DOLA_COOKIE=${DOLA_COOKIE}
+      - PROXY=${DOLA_PROXY:-}
+    ports:
+      - "127.0.0.1:8491:8491"
+  dola-service:
+    build: .
+    depends_on: [dola-signer]
+    environment:
+      - DOLA_COOKIE=${DOLA_COOKIE}
+      - DOLA_PROXY=${DOLA_PROXY:-}
+      - SIGNER_URL=http://dola-signer:8491
+      - API_KEYS=${API_KEYS}
+      - DB_PATH=/srv/data/dola.sqlite3
+    volumes:
+      - ./data:/srv/data
+    ports:
+      - "127.0.0.1:8490:8490"

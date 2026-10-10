@@ -1,0 +1,23 @@
+# 🔴 凭据——绝不入库
+probe/.dola_cookie
+*.env
+
+# 上游取证大文件与产物
+probe/bundles/
+probe/out_live/
+probe/out_wm/
+probe/out_wm/fetched/
+probe/negctl/
+probe/page.html
+
+# 运行时
+data/
+*.sqlite3
+signer/node_modules/
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# 本地真实凭据配置（节点/账号）
+*.local.json
+.workbuddy/
