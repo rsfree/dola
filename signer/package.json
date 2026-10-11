@@ -2,12 +2,14 @@
   "name": "dola-signer",
   "version": "1.0.0",
   "private": true,
-  "description": "dola.com a_bogus 铸签 sidecar：headless Chrome 加载页面让 mssdk SDK 签名，CDP 拦截零副作用取回签名 URL",
+  "description": "dola.com a_bogus \u94f8\u7b7e sidecar\uff1aheadless Chrome \u52a0\u8f7d\u9875\u9762\u8ba9 mssdk SDK \u7b7e\u540d\uff0cCDP \u62e6\u622a\u96f6\u526f\u4f5c\u7528\u53d6\u56de\u7b7e\u540d URL",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "puppeteer-core": "^23.0.0"
+    "puppeteer-core": "^23.0.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
   }
 }
