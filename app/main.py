@@ -390,7 +390,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/v1/images/generations")
     def images_sync(req: ImageRequest, request: Request = None) -> dict:  # type: ignore[assignment]
         _bearer(request)
-        acct = _pick_account(request)
         reg = IMAGE_MODELS.get(req.model)
         if not reg:
             raise InvalidParameterError(f"未知图像模型 {req.model}；"
@@ -400,8 +399,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "reply_message_format": "生成图片：%s"}}
         if req.ratio:
             ap["ratio"] = req.ratio
-        ac_client = acct.client(settings.device_id, settings.web_id,
-                                nodes=registry.nodes)
+        ac_client = _client_for(request)
         try:
             with lock:
                 conv_id, _ = _submit(ac_client, signer, prompt=req.prompt,
@@ -410,25 +408,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         timeout=settings.image_poll_timeout,
                         interval=settings.poll_interval)
         except UpstreamAuthError:
-            registry.mark_dead(acct.name, "712012001 cookie 失效")
             raise
-        registry.mark_ok(acct.name)
         if res["status"] != "succeeded":
             raise AdapterError(f"出图超时（{settings.image_poll_timeout}s）",
                                code="generation_timeout")
         return {"created": int(time.time()), "data": _images_payload(res["arts"]),
-                "conversation_id": conv_id, "account": acct.name}
+                "conversation_id": conv_id}
 
     # ---- 图像：异步 ----
     @app.post("/async/v1/images/generations", status_code=202)
     def images_async(req: ImageRequest, request: Request = None) -> dict:  # type: ignore[assignment]
         fp = _fp(request)
-        acct = _pick_account(request)
         reg = IMAGE_MODELS.get(req.model)
         if not reg:
             raise InvalidParameterError(f"未知图像模型 {req.model}")
-        task_id = store.create("image", fp, req.prompt, req.model,
-                               account=acct.name)
+        task_id = store.create("image", fp, req.prompt, req.model)
         def _run() -> None:
             try:
                 ap = {"input_box_content": {
@@ -436,7 +430,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "reply_message_format": "生成图片：%s"}}
                 if req.ratio:
                     ap["ratio"] = req.ratio
-                ac_client = _client_of(acct.name)
+                ac_client = _client_for_bearer(bearer_token)
                 with lock:
                     conv_id, _ = _submit(ac_client, signer, prompt=req.prompt,
                                          skill=reg["skill"], ability_param=ap)
@@ -449,17 +443,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                  upstream={"data": _images_payload(res["arts"])})
                 else:
                     store.update(task_id, status="failed", error="timeout")
-                registry.mark_ok(acct.name)
             except UpstreamAuthError:
-                registry.mark_dead(acct.name, "712012001 cookie 失效")
                 store.update(task_id, status="failed", error="account auth failed")
             except AdapterError as e:
-                registry.mark_fail(acct.name)
                 store.update(task_id, status="failed", error=str(e))
             except Exception as e:  # 后台线程兜底，绝不哑死
                 store.update(task_id, status="failed", error=f"internal: {e}")
         threading.Thread(target=_run, daemon=True).start()
-        return {"task_id": task_id, "status": "queued", "account": acct.name}
+        return {"task_id": task_id, "status": "queued"}
 
     @app.get("/async/v1/images/generations/{task_id}")
     def images_status(task_id: str, request: Request = None) -> dict:  # type: ignore[assignment]
@@ -470,18 +461,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                "model": row["model"], "prompt": row["prompt"],
                "account": row.get("account", "default"),
                "created_at": row["created_at"]}
-        # 🔴 亲和轮询：running 态即时刷新一次（用创建账号的客户端读链）
-        if row["status"] == "running" and row["conv_id"]:
-            try:
-                res = _poll(_client_of(row["account"]), row["conv_id"], "image",
-                            timeout=1.5, interval=0.5)
-                if res["status"] == "succeeded":
-                    store.update(task_id, status="succeeded",
-                                 upstream={"data": _images_payload(res["arts"])})
-                    out["status"] = "succeeded"
-                    out["data"] = _images_payload(res["arts"])
-            except (AdapterError, DolaError):
-                pass
+
         if row["upstream"]:
             out["data"] = json.loads(row["upstream"]).get("data")
         if row["error"]:
@@ -504,27 +484,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/v3/contents/generations/tasks")
     def video_create(req: ArkVideoRequest, request: Request = None) -> dict:  # type: ignore[assignment]
         fp = _fp(request)
-        req_header_account = (request.headers.get("x-account") or "").strip() if request else ""
-        acct = _pick_account(request)
         reg = VIDEO_MODELS.get(req.model)
         if not reg:
             raise InvalidParameterError(f"未知视频模型 {req.model}；"
                                         f"可用：{sorted(VIDEO_MODELS)}")
-        task_id = store.create("video", fp, req.prompt, req.model,
-                               account=acct.name)
+        task_id = store.create("video", fp, req.prompt, req.model)
         ap = {"model": reg["ability_model"], "duration": req.duration,
               "input_box_content": {"user_input_content": req.prompt,
                                     "reply_message_format": "生成视频：%s"}}
         def _run() -> None:
             # 🔴 满额换号：QuotaExceeded ⇒ 标记到次日 ⇒ 自动换下一个账号重试
-            _generation_with_failover(registry, store, signer, settings, lock,
+                _generation_with_failover(registry, store, signer, settings, lock,
                                       task_id=task_id, kind="video",
                                       prompt=req.prompt, model_key=req.model,
-                                      prefer=req_header_account,
                                       ability_extra=ap)
         threading.Thread(target=_run, daemon=True).start()
-        return {"id": task_id, "model": req.model, "status": "queued",
-                "account": acct.name}
+        return {"id": task_id, "model": req.model, "status": "queued"}
 
     @app.get("/api/v3/contents/generations/tasks/{task_id}")
     def video_status(task_id: str, request: Request = None) -> dict:  # type: ignore[assignment]
@@ -533,18 +508,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="not found")
         status = {"queued": "queued", "running": "running",
                   "succeeded": "succeeded", "failed": "failed"}[row["status"]]
-        # 🔴 亲和轮询：running 态即时刷新（创建账号客户端）
-        if status == "running" and row["conv_id"]:
-            try:
-                res = _poll(_client_of(row["account"]), row["conv_id"], "video",
-                            timeout=1.5, interval=0.5)
-                if res["status"] == "succeeded":
-                    store.update(task_id, status="succeeded",
-                                 upstream=_video_payload(res["arts"][0]))
-                    row = store.get(task_id)
-                    status = "succeeded"
-            except (AdapterError, DolaError):
-                pass
+
         out: dict[str, Any] = {"id": task_id, "model": row["model"],
                                "status": status, "account": row.get("account", "default")}
         if row["status"] == "succeeded" and row["upstream"]:

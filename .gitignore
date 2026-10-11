@@ -21,3 +21,4 @@ __pycache__/
 # 本地真实凭据配置（节点/账号）
 *.local.json
 .workbuddy/
+deploy/
