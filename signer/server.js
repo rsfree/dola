@@ -111,8 +111,8 @@ async function boot() {
     // 等 mssdk SDK hook 就绪
     try {
       await page.waitForFunction(
-        () => window.byted_acrawler && typeof window.fetch === "function" && window.fetch.toString().includes("bogus"),
-        { timeout: 30000 }
+        () => window.byted_acrawler && typeof window.fetch === "function" && window.fetch.toString().length > 500,
+        { timeout: 300000, polling: 5000 }
       );
       console.log("[dola-signer] mssdk hook ready");
     } catch {
@@ -127,7 +127,7 @@ async function hookAlive() {
   try {
     return await page.evaluate(() =>
       !!(window.byted_acrawler && typeof window.fetch === "function" &&
-         window.fetch !== window.__rawFetch && window.fetch.toString().length > 200)
+         window.fetch.toString().length > 500)
     );
   } catch { return false; }
 }
