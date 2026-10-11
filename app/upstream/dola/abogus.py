@@ -1,195 +1,271 @@
-#!/usr/bin/env python3
-"""ByteDance a_bogus 签名算法 —— 纯 Python 实现（SM3 + RC4 + 魔改 Base64）。
-
-基于开源逆向成果（JoeanAmier/TikTokDownloader、DLWangSan/douyin_parse）适配 dola.com。
-dola 的 SDK 版本可能不同（webmssdk_1.0.0.44 vs bdms），核心算法族相同但参数需调。
 """
-from __future__ import annotations
-import json, time, random, struct
+ByteDance A-Bogus 签名算法 —— 纯 Python 实现（适配 dola.com）。
+
+算法族同源（webmssdk 家族），核心结构：双 SM3(加盐) → RC4(key='y') → 魔改 Base64(s4)。
+基于开源逆向成果（JoeanAmier/TikTokDownloader GPL v3 / DLWangSan/douyin_parse）。
+dola 特有参数：aid=495671, pageId=26930。UA 须为 Chrome/153 macOS。
+
+需要 gmssl 库提供 SM3 哈希支持。
+"""
+
+from random import choice, randint, random
+from re import compile as re_compile
+from time import time
 from urllib.parse import urlencode, quote
 from gmssl import sm3, func
 
-# ---- 字符集（ByteDance 魔改 Base64）----
-_CHARSETS = {
-    "s0": "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=",
-    "s1": "Dkdpgh4ZKsQB80/Mfvw36XI1R25+WUAlEi7NLboqYTOPuzmFjJnryx9HVGcaStCe=",
-    "s2": "Dkdpgh4ZKsQB80/Mfvw36XI1R25-WUAlEi7NLboqYTOPuzmFjJnryx9HVGcaStCe=",
-    "s3": "ckdp1h4ZKsUB80/Mfvw36XIgR25+WQAlEi7NLboqYTOPuzmFjJnryx9HVGDaStCe",
-    "s4": "Dkdpgh4ZKsQB80/Mfvw36XI1R25-WUAlEi7NLboqYTOPuzmFjJnryx9HVGcaStCe=",
-}
-
-# ---- SM3 初始化向量 ----
-_REG_INIT = [0x7380166F, 0x4914B2B9, 0x172442D7, 0xDA8A0600,
-             0xA96F30BC, 0x163138AA, 0xE38DEE4D, 0xB0FB0E4E]
-
-_DEFAULT_BROWSER = "1536|742|1536|864|0|0|0|0|1536|864|1536|864|1536|742|24|24|MacIntel"
-UA_DEFAULT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36")
-
-
-def _sm3_hash(data: str | bytes) -> str:
-    if isinstance(data, str):
-        data = data.encode("utf-8")
-    return sm3.sm3_hash(func.bytes_to_list(data))
-
-
-def _rc4(key: bytes, data: bytes) -> bytes:
-    S = list(range(256))
-    j = 0
-    for i in range(256):
-        j = (j + S[i] + key[i % len(key)]) % 256
-        S[i], S[j] = S[j], S[i]
-    out = bytearray()
-    i = j = 0
-    for byte in data:
-        i = (i + 1) % 256
-        j = (j + S[i]) % 256
-        S[i], S[j] = S[j], S[i]
-        out.append(byte ^ S[(S[i] + S[j]) % 256])
-    return bytes(out)
-
-
-def _b64_encode(data: bytes, charset: str) -> str:
-    b64 = ""
-    for i in range(0, len(data) - len(data) % 3, 3):
-        n = (data[i] << 16) + (data[i+1] << 8) + data[i+2]
-        b64 += "".join(charset[(n >> s) & 63] for s in (18, 12, 6, 0))
-    rem = len(data) % 3
-    if rem == 1:
-        n = data[-1] << 16
-        b64 += charset[(n >> 18) & 63] + charset[(n >> 12) & 63] + "=="
-    elif rem == 2:
-        n = (data[-2] << 16) + (data[-1] << 8)
-        b64 += "".join(charset[(n >> s) & 63] for s in (18, 12, 6)) + "="
-    return b64
-
-
-def _rc4_encode(text: str, charset: str = "s2") -> str:
-    key = b"\x00\x01\x0e"
-    encrypted = _rc4(key, text.encode("utf-8"))
-    return _b64_encode(encrypted, _CHARSETS[charset])
-
-
-def _char_code_at(s: str) -> list[int]:
-    return [ord(c) for c in s]
+__all__ = ["ABogus"]
 
 
 class ABogus:
-    """生成 ByteDance a_bogus 签名参数（适配 dola.com）。"""
+    """生成抖音 API 请求所需的 A-Bogus 签名参数"""
 
-    def __init__(self, user_agent: str = UA_DEFAULT, browser_fp: str = ""):
-        self.ua_key = b"\x00\x01\x0e"
-        self.ua_code = self._sm3_to_list(_sm3_hash(user_agent))
-        self.browser = browser_fp or _DEFAULT_BROWSER
-        self.browser_len = len(self.browser)
-        self.browser_code = _char_code_at(self.browser)
-        self.chunk: list[int] = []
+    _url_encode_filter = re_compile(r"%([0-9A-F]{2})")
+    _arguments = [0, 1, 14]
+    _ua_key = "\x00\x01\x0e"
+    _end_string = "cus"
+    _version = [1, 0, 1, 5]
+    _browser = "1536|742|1536|864|0|0|0|0|1536|864|1536|864|1536|742|24|24|MacIntel"
+    _reg_init = [
+        1937774191, 1226093241, 388252375, 3666478592,
+        2842636476, 372324522, 3817729613, 2969243214,
+    ]
+    _charsets = {
+        "s0": "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=",
+        "s1": "Dkdpgh4ZKsQB80/Mfvw36XI1R25+WUAlEi7NLboqYTOPuzmFjJnryx9HVGcaStCe=",
+        "s2": "Dkdpgh4ZKsQB80/Mfvw36XI1R25-WUAlEi7NLboqYTOPuzmFjJnryx9HVGcaStCe=",
+        "s3": "ckdp1h4ZKsUB80/Mfvw36XIgR25+WQAlEi7NLboqYTOPuzmFjJnryx9HVGDaStCe",
+        "s4": "Dkdpgh2ZmsQB80/MfvV36XI1R45-WUAlEixNLwoqYTOPuzKFjJnry79HbGcaStCe",
+    }
+
+    def __init__(self, platform: str = None):
+        self.chunk = []
         self.size = 0
-        self.reg = _REG_INIT[:]
+        self.reg = self._reg_init[:]
+
+        # UA 特征码 (需要根据实际使用的 User-Agent 调整)
+        self.ua_code = [
+            76, 98, 15, 131, 97, 245, 224, 133, 122, 199,
+            241, 166, 79, 34, 90, 191, 128, 126, 122, 98,
+            66, 11, 14, 40, 49, 110, 110, 173, 67, 96, 138, 252,
+        ]
+
+        self.browser = self._generate_browser_info(platform) if platform else self._browser
+        self.browser_len = len(self.browser)
+        self.browser_code = self._char_code_at(self.browser)
+
+    # ---- 随机数生成 ----
+
+    @classmethod
+    def _list_1(cls, random_num=None, a=170, b=85, c=45):
+        return cls._random_list(random_num, a, b, 1, 2, 5, c & a)
+
+    @classmethod
+    def _list_2(cls, random_num=None, a=170, b=85):
+        return cls._random_list(random_num, a, b, 1, 0, 0, 0)
+
+    @classmethod
+    def _list_3(cls, random_num=None, a=170, b=85):
+        return cls._random_list(random_num, a, b, 1, 0, 5, 0)
 
     @staticmethod
-    def _sm3_to_list(hash_hex: str) -> list[int]:
-        return [int(hash_hex[i:i+2], 16) for i in range(0, len(hash_hex), 2)][:32]
-
-    @staticmethod
-    def _random_list(a=None, b=170, c=85, d=0, e=0, f=0, g=0) -> list[int]:
-        r = a or (random.random() * 10000)
+    def _random_list(a=None, b=170, c=85, d=0, e=0, f=0, g=0):
+        r = a if a is not None else (random() * 10000)
         v = [r, int(r) & 255, int(r) >> 8]
-        s = v[0] & b | d
-        v.append(s)
-        s = v[0] & c | e
-        v.append(s)
-        s = v[0] & b | f
-        v.append(s)
-        s = v[0] & c | g
-        v.append(s)
-        return v[-4:]
+        return [
+            v[1] & b | d,
+            v[1] & c | e,
+            v[2] & b | f,
+            v[2] & c | g,
+        ]
 
-    def _generate_string_1(self) -> str:
-        return "".join(chr(x) for x in self._random_list()) + \
-               "".join(chr(x) for x in self._random_list(b=85, c=85, d=0, e=0, f=0)) + \
-               "".join(chr(x) for x in self._random_list(b=170, c=85, d=0, e=10, f=0))
+    @staticmethod
+    def _from_char_code(*args):
+        return "".join(chr(code) for code in args)
 
-    def generate_a_bogus(self, url_query: str, body: str = "",
-                         user_agent: str = "") -> str:
-        """生成 a_bogus 签名值。
+    def _generate_string_1(self, r1=None, r2=None, r3=None):
+        return (self._from_char_code(*self._list_1(r1)) +
+                self._from_char_code(*self._list_2(r2)) +
+                self._from_char_code(*self._list_3(r3)))
+
+    # ---- 字符串 2 生成 ----
+
+    def _generate_string_2(self, url_params: str, method="GET",
+                           start_time=0, end_time=0) -> str:
+        a = self._list_4_list(url_params, method, start_time, end_time)
+        e = self._end_check_num(a)
+        a.extend(self.browser_code)
+        a.append(e)
+        return self._rc4_encrypt(self._from_char_code(*a), "y")
+
+    def _list_4_list(self, url_params: str, method="GET",
+                     start_time=0, end_time=0) -> list:
+        start_time = start_time or int(time() * 1000)
+        end_time = end_time or (start_time + randint(4, 8))
+        params_arr = self._generate_params_code(url_params)
+        method_arr = self._generate_method_code(method)
+        return self._list_4(
+            (end_time >> 24) & 255, params_arr[21], self.ua_code[23],
+            (end_time >> 16) & 255, params_arr[22], self.ua_code[24],
+            (end_time >> 8) & 255, (end_time >> 0) & 255,
+            (start_time >> 24) & 255, (start_time >> 16) & 255,
+            (start_time >> 8) & 255, (start_time >> 0) & 255,
+            method_arr[21], method_arr[22],
+            (end_time // 256 // 256 // 256 // 256) & 0xFF,
+            (start_time // 256 // 256 // 256 // 256) & 0xFF,
+            self.browser_len,
+        )
+
+    @staticmethod
+    def _list_4(a, b, c, d, e, f, g, h, i, j, k, m, n, o, p, q, r):
+        return [
+            44, a, 0, 0, 0, 0, 24, b, n, 0, c, d, 0, 0, 0, 1, 0, 239,
+            e, o, f, g, 0, 0, 0, 0, h, 0, 0, 14, i, j, 0, k, m, 3, p, 1,
+            q, 1, r, 0, 0, 0,
+        ]
+
+    # ---- SM3 哈希相关 ----
+
+    @classmethod
+    def _generate_method_code(cls, method: str) -> list:
+        return cls._sm3_to_array(cls._sm3_to_array(method + cls._end_string))
+
+    def _generate_params_code(self, params: str) -> list:
+        return self._sm3_to_array(self._sm3_to_array(params + self._end_string))
+
+    @classmethod
+    def _sm3_to_array(cls, data) -> list:
+        if isinstance(data, str):
+            b = data.encode("utf-8")
+        else:
+            b = bytes(data)
+        h = sm3.sm3_hash(func.bytes_to_list(b))
+        return [int(h[i:i + 2], 16) for i in range(0, len(h), 2)]
+
+    # ---- 工具方法 ----
+
+    @staticmethod
+    def _end_check_num(arr: list) -> int:
+        r = 0
+        for i in arr:
+            r ^= i
+        return r
+
+    @staticmethod
+    def _char_code_at(s: str) -> list:
+        return [ord(c) for c in s]
+
+    @staticmethod
+    def _rc4_encrypt(plaintext: str, key: str) -> str:
+        s = list(range(256))
+        j = 0
+        for i in range(256):
+            j = (j + s[i] + ord(key[i % len(key)])) % 256
+            s[i], s[j] = s[j], s[i]
+        i = j = 0
+        result = []
+        for ch in plaintext:
+            i = (i + 1) % 256
+            j = (j + s[i]) % 256
+            s[i], s[j] = s[j], s[i]
+            t = (s[i] + s[j]) % 256
+            result.append(chr(s[t] ^ ord(ch)))
+        return "".join(result)
+
+    @staticmethod
+    def _generate_browser_info(platform: str) -> str:
+        inner_w = randint(1280, 1920)
+        inner_h = randint(720, 1080)
+        outer_w = randint(inner_w, 1920)
+        outer_h = randint(inner_h, 1080)
+        values = [
+            inner_w, inner_h, outer_w, outer_h,
+            0, choice((0, 30)), 0, 0,
+            outer_w, outer_h, outer_w, outer_h,
+            inner_w, inner_h, 24, 24,
+            platform,
+        ]
+        return "|".join(str(v) for v in values)
+
+    # ---- 结果编码 ----
+
+    @classmethod
+    def _generate_result(cls, s: str, charset="s4") -> str:
+        cs = cls._charsets[charset]
+        result = []
+        for i in range(0, len(s), 3):
+            remaining = len(s) - i
+            if remaining >= 3:
+                n = (ord(s[i]) << 16) | (ord(s[i + 1]) << 8) | ord(s[i + 2])
+                result.append(cs[(n >> 18) & 63])
+                result.append(cs[(n >> 12) & 63])
+                result.append(cs[(n >> 6) & 63])
+                result.append(cs[n & 63])
+            elif remaining == 2:
+                n = (ord(s[i]) << 16) | (ord(s[i + 1]) << 8)
+                result.append(cs[(n >> 18) & 63])
+                result.append(cs[(n >> 12) & 63])
+                result.append(cs[(n >> 6) & 63])
+            else:
+                n = ord(s[i]) << 16
+                result.append(cs[(n >> 18) & 63])
+                result.append(cs[(n >> 12) & 63])
+        # 补等号
+        padding = (4 - len(result) % 4) % 4
+        result.append("=" * padding)
+        return "".join(result)
+
+    # ---- 主接口 ----
+
+    def get_value(self, url_params, method="GET",
+                  start_time=0, end_time=0,
+                  random_num_1=None, random_num_2=None, random_num_3=None) -> str:
+        """
+        生成 A-Bogus 签名
 
         Args:
-            url_query: URL 查询参数字符串（不含 a_bogus 本身）
-            body: POST body（如有）
-            user_agent: UA 字符串
+            url_params: dict 或 str 类型的 URL 参数
+            method: HTTP 方法 (GET/POST)
+            start_time: 起始时间戳 (毫秒)
+            end_time: 结束时间戳 (毫秒)
 
         Returns:
-            a_bogus 签名值
+            A-Bogus 签名字符串 (需 URL 编码后使用)
         """
-        # 1) SM3 双重哈希
-        sm3_url = _sm3_hash(url_query)
-        sm3_body = _sm3_hash(body) if body else ""
-        sm3_ua = _sm3_hash(user_agent or UA_DEFAULT)
+        if isinstance(url_params, dict):
+            url_params = urlencode(url_params)
 
-        # 2) RC4 加密 UA
-        ua_key = bytes([0x00, 0x01, 0x0E])
-        rc4_ua = _rc4(ua_key, (user_agent or UA_DEFAULT).encode())
-
-        # 3) 组装数据包
-        timestamp = int(time.time())
-        page_id = 26930  # dola pageId
-        aid = 495671     # dola aid
-
-        result_list = []
-        # 哈希字节
-        result_list.extend(self._sm3_to_list(sm3_url)[:16])
-        if sm3_body:
-            result_list.extend(self._sm3_to_list(sm3_body)[:8])
-        # UA 编码
-        result_list.extend(list(rc4_ua[:16]))
-        # 时间戳（4 字节 big-endian）
-        result_list.extend([(timestamp >> s) & 0xFF for s in (24, 16, 8, 0)])
-        # aid（4 字节）
-        result_list.extend([(aid >> s) & 0xFF for s in (24, 16, 8, 0)])
-        # pageId（2 字节）
-        result_list.extend([(page_id >> s) & 0xFF for s in (8, 0)])
-        # 浏览器指纹长度
-        result_list.extend([self.browser_len & 0xFF, (self.browser_len >> 8) & 0xFF])
-
-        # 填充到 4 的倍数
-        while len(result_list) % 4 != 0:
-            result_list.append(0)
-
-        # 4) 256 数组洗牌
-        result_list = self._shuffle_256(result_list)
-
-        # 5) XOR + 随机前缀
-        result_list = self._xor_and_prefix(result_list)
-
-        # 6) 魔改 Base64 编码
-        raw = bytes(result_list)
-        b64_s4 = _b64_encode(raw, _CHARSETS["s4"])
-        b64_s2 = _b64_encode(raw, _CHARSETS["s2"])
-
-        return b64_s4
-
-    def _shuffle_256(self, data: list[int]) -> list[int]:
-        """256 字节数组洗牌（简化版）。"""
-        reg = self.reg[:]
-        for i in range(len(data)):
-            idx = (data[i] + reg[i % 8]) % 256
-            data[i] = (data[i] ^ reg[(i + 3) % 8]) & 0xFF
-            reg[idx % 8] = (reg[idx % 8] + data[i]) & 0xFF
-        return data
-
-    def _xor_and_prefix(self, data: list[int]) -> list[int]:
-        """XOR 操作 + 添加 12 字节随机前缀。"""
-        prefix = [random.randint(0, 255) for _ in range(12)]
-        result = prefix + data
-        # XOR 混淆
-        for i in range(len(result)):
-            result[i] = (result[i] ^ (i * 7 + 3)) & 0xFF
-        return result
+        string_1 = self._generate_string_1(random_num_1, random_num_2, random_num_3)
+        string_2 = self._generate_string_2(url_params, method, start_time, end_time)
+        combined = string_1 + string_2
+        return self._generate_result(combined, "s4")
 
 
 if __name__ == "__main__":
-    ab = ABogus()
-    result = ab.generate_a_bogus("aid=495671&device_platform=web", '{"test":1}')
-    print(f"a_bogus length: {len(result)}")
-    print(f"a_bogus: {result}")
+    # 测试
+    import json
+
+    bogus = ABogus()
+    test_params = {
+        "device_platform": "webapp",
+        "aid": "6383",
+        "channel": "channel_pc_web",
+        "pc_client_type": "1",
+        "version_code": "190500",
+        "version_name": "19.5.0",
+        "cookie_enabled": "true",
+        "browser_language": "zh-CN",
+        "browser_platform": "Win32",
+        "browser_name": "Firefox",
+        "browser_online": "true",
+        "engine_name": "Gecko",
+        "os_name": "Windows",
+        "os_version": "10",
+        "platform": "PC",
+        "screen_width": "1920",
+        "screen_height": "1080",
+        "cpu_core_num": "12",
+        "aweme_id": "7345492945006595379",
+    }
+    a_bogus = bogus.get_value(test_params)
+    print(f"A-Bogus: {quote(a_bogus, safe='')}")
