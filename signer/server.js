@@ -122,7 +122,21 @@ async function boot() {
 }
 
 /** 单次铸签尝试。 */
+// 🔴 hook 存活预检：mssdk 会话过期后 fetch hook 静默消失 ⇒ 铸签前先验，过期就重载
+async function hookAlive() {
+  try {
+    return await page.evaluate(() =>
+      !!(window.byted_acrawler && typeof window.fetch === "function" &&
+         window.fetch !== window.__rawFetch && window.fetch.toString().length > 200)
+    );
+  } catch { return false; }
+}
+
 async function mintOnce(url, method, body) {
+    if (!(await hookAlive())) {
+      console.log("[dola-signer] hook dead (mssdk session expired) -> reload");
+      await reloadPage();
+    }
   const u = new URL(url);
   const urlPrefix = `${u.origin}${u.pathname}`;
   const pending = { urlPrefix, done: false, signedUrl: null, resolve: null };
@@ -155,6 +169,7 @@ async function mintOnce(url, method, body) {
 
 /** 页面老化自愈：SDK 长时间不开口 ⇒ 刷新页面重新加载 mssdk。 */
 async function reloadPage() {
+  await page.evaluate(() => { window.__rawFetch = window.__rawFetch || window.fetch; }).catch(() => {});
   console.log("[dola-signer] page stale -> reloading");
   pageReady = false;
   await page.goto(PAGE_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
