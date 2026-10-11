@@ -42,14 +42,25 @@ from .upstream.dola.signer import SignerClient, SignerError
 # ---------------------------------------------------------------- 模型注册表
 # 只登记**验证过**的键；未验证的模型键宁可 400 也不瞎猜（上游 ic_mini 之外的
 # 内部键未实抓，猜错 = 710020202）。
+# 火山方舟风格别名（同一模型多个入口名；newapi 用 Ark 命名也能路由）
+_IMG_CFG = {"skill": 3, "ability_model": None, "verified": True}
+_V25_CFG = {"skill": 17, "ability_model": "seedance_v2.5", "duration": 10, "verified": True}
+_V10_CFG = {"skill": 17, "ability_model": "ic_mini", "duration": 10, "verified": True}
 IMAGE_MODELS = {
-    "dola-seedream-4.5": {"skill": 3, "ability_model": None, "verified": True},
+    "dola-seedream-4.5": _IMG_CFG,
+    # Ark 对齐名
+    "doubao-seedream-4.5": _IMG_CFG,
+    "doubao-seedream-4-5": _IMG_CFG,
 }
 VIDEO_MODELS = {
-    "dola-seedance-1-0": {"skill": 17, "ability_model": "ic_mini",
-                          "duration": 10, "verified": True},
-    "dola-seedance-2-5": {"skill": 17, "ability_model": "seedance_v2.5",
-                          "duration": 10, "verified": True},
+    "dola-seedance-1-0": _V10_CFG,
+    "dola-seedance-2-5": _V25_CFG,
+    # Ark 对齐名
+    "doubao-seedance-1-0": _V10_CFG,
+    "doubao-seedance-1-0-lite": _V10_CFG,
+    "doubao-seedance-2-5": _V25_CFG,
+    "doubao-seedance-2-5-pro": _V25_CFG,
+    "doubao-seedance-2-0": _V25_CFG,
 }
 
 
