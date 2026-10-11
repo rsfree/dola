@@ -158,6 +158,13 @@ class AccountRegistry:
     def get(self, name: str) -> Account | None:
         return self._accounts.get(name)
 
+    def get_by_sessionid(self, sessionid: str) -> Account | None:
+        """按 sessionid 查找账号（Bearer 透传场景）。"""
+        for a in self._accounts.values():
+            if sessionid in a.cookie:
+                return a
+        return None
+
     def mark_ok(self, name: str) -> None:
         with self._lock:
             a = self._accounts.get(name)

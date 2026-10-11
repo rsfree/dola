@@ -48,7 +48,22 @@ function parseCookieString(str) {
 
 async function boot() {
   if (!CHROME_PATH) throw new Error("CHROME_PATH 未配置");
-  const args = ["--no-sandbox", "--disable-blink-features=AutomationControlled"];
+  const args = [
+    "--no-sandbox",
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    "--disable-software-rasterizer",
+    "--disable-extensions",
+    "--disable-popup-blocking",
+    "--disable-notifications",
+    "--disable-infobars",
+    "--disable-blink-features=AutomationControlled",
+    "--disable-features=IsolateOrigins,site-per-process",
+    "--disable-site-isolation-trials",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--window-size=1536,864",
+  ];
   if (PROXY) args.push(`--proxy-server=${PROXY}`);
   browser = await puppeteer.launch({
     executablePath: CHROME_PATH,
@@ -56,6 +71,13 @@ async function boot() {
     args,
   });
   page = await browser.newPage();
+  // 反检测：覆写 navigator.webdriver
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+    // 覆写 chrome.runtime 防检测
+    window.chrome = window.chrome || {};
+    window.chrome.runtime = window.chrome.runtime || { connect: () => {} };
+  });
   await page.setUserAgent(
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
       "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
@@ -82,7 +104,18 @@ async function boot() {
     }
     if (!req.isInterceptResolutionHandled()) req.continue();
   });
-  await page.goto(PAGE_URL, { waitUntil: "networkidle2", timeout: 45000 });
+  await page.goto(PAGE_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+
+    // 等 mssdk SDK hook 就绪
+    try {
+      await page.waitForFunction(
+        () => window.byted_acrawler && typeof window.fetch === "function" && window.fetch.toString().includes("bogus"),
+        { timeout: 30000 }
+      );
+      console.log("[dola-signer] mssdk hook ready");
+    } catch {
+      console.log("[dola-signer] mssdk hook timeout, continuing anyway");
+    }
   pageReady = true;
 }
 
@@ -122,7 +155,7 @@ async function mintOnce(url, method, body) {
 async function reloadPage() {
   console.log("[dola-signer] page stale -> reloading");
   pageReady = false;
-  await page.goto(PAGE_URL, { waitUntil: "networkidle2", timeout: 45000 });
+  await page.goto(PAGE_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
   pageReady = true;
   console.log("[dola-signer] page reloaded");
 }

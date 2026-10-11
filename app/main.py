@@ -321,7 +321,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with _bearer_lock:
             cl = _bearer_clients.get(token)
             if cl is None:
-                cookie = token  # 🔴 Bearer = 完整 cookie 串，直接透传
+                cookie = token  # Bearer 透传
+                # 🔴 按 sessionid 匹配账号池 → 用完整 cookie（含 ttwid/csrf 等）
+                acct = registry.get_by_sessionid(token)
+                if acct:
+                    cookie = acct.cookie
                 cl = DolaClient(cookie, device_id=settings.device_id,
                                 web_id=settings.web_id,
                                 proxy=settings.upstream_proxy or None)
