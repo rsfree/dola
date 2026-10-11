@@ -4,4 +4,4 @@ httpx>=0.27
 pydantic>=2.7
 curl_cffi>=0.16
 pytest>=8.0
-socksio>=1.1
+socksio
