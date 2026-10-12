@@ -175,7 +175,16 @@ async function mintOnce(url, method, body) {
 async function reloadPage() {
   console.log("[dola-signer] page stale -> reloading");
   pageReady = false;
-  await page.goto(PAGE_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+  try {
+    await page.goto(PAGE_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+  } catch (e) {
+    // 🔴 导航都超时 = Chrome 状态劣化（reload 循环后页面无法加载，实测踩过）
+    //    ⇒ 升级为整机重启浏览器：browser.close + boot()（boot 含金丝雀，完成后 pageReady=true）
+    console.log("[dola-signer] goto failed -> full browser relaunch:", e.message);
+    try { await browser.close(); } catch {}
+    await boot();
+    return;
+  }
   // 🔴 金丝雀等 hook：mssdk 初始化要数分钟，等到真出 a_bogus 才算 ready
   const deadline = Date.now() + 8 * 60 * 1000;
   let ready = false;
