@@ -64,7 +64,7 @@ async function boot() {
     "--disable-site-isolation-trials",
     "--no-first-run",
     "--no-default-browser-check",
-    "--window-size=1536,864",
+    "--window-size=1280,800",
   ];
   if (PROXY) args.push(`--proxy-server=${PROXY}`);
   browser = await puppeteer.launch({
@@ -81,10 +81,10 @@ async function boot() {
     window.chrome.runtime = window.chrome.runtime || { connect: () => {} };
   });
   await page.setUserAgent(
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
-      "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+      "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
   );
-  await page.setViewport({ width: 1440, height: 900 });
+  await page.setViewport({ width: 1280, height: 800 });
   if (DOLA_COOKIE) {
     const cookies = parseCookieString(DOLA_COOKIE);
     if (cookies.length) await page.setCookie(...cookies);
