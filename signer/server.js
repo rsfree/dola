@@ -216,6 +216,36 @@ function readBody(req) {
   });
 }
 
+// ===== 🔴 签名池（预取）：a_bogus 只绑 URL 不绑 body（2026-10-12 实测）=====
+// 服务侧 /chat/completion 的 URL 恒定（common_query 固定）⇒ 预铸签名可复用任意 body。
+// 池既是零延迟预取，也是 hook 保活（每 20s 真实铸签一次）。
+const POOL_URL = process.env.POOL_URL || "";
+const POOL_SIZE = parseInt(process.env.POOL_SIZE || "12", 10);
+const POOL_TTL_MS = 4 * 60 * 1000;   // a_bogus TTL ≥5min，留 1min 安全边际
+const sigPool = [];                   // [{url, at}] 按时间升序
+
+async function poolFiller() {
+  if (!POOL_URL || !pageReady) return;
+  const now = Date.now();
+  while (sigPool.length && now - sigPool[0].at > POOL_TTL_MS) sigPool.shift();
+  if (sigPool.length >= POOL_SIZE) return;
+  if (pendingMints.some((p) => !p.done)) return; // 真实铸签优先
+  try {
+    const signed = await mintOnce(POOL_URL, "POST", "{}");
+    sigPool.push({ url: signed, at: Date.now() });
+    poolFailStreak = 0;
+  } catch (e) {
+    poolFailStreak += 1;
+    if (poolFailStreak >= 3) {  // 会话死了：连续 3 次（~1min）触发自愈 reload
+      console.log("[dola-signer] pool fill fail x3 -> reload:", e.message);
+      poolFailStreak = 0;
+      try { await reloadPage(); } catch (e2) { console.log("[dola-signer] reload err:", e2.message); }
+    }
+  }
+}
+let poolFailStreak = 0;
+setInterval(() => { poolFiller().catch(() => {}); }, 20 * 1000).unref();
+
 // 🔴 周期金丝雀保活：mssdk 会话 ~30 分钟过期，每 10 分钟验一次；
 //    失败先 60s 后重试一次（瞬时抖动不 reload），连续两次失败才 reload
 //    （频繁 reload 反而触发上游会话清除，实测踩过）
@@ -251,6 +281,17 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(400, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: "url 必须是 dola.com 绝对地址" }));
         return;
+      }
+      // 🔴 签名池命中（URL 严格相等）：零延迟返回预铸签名
+      if (POOL_URL && url === POOL_URL) {
+        const now2 = Date.now();
+        while (sigPool.length && now2 - sigPool[0].at > POOL_TTL_MS) sigPool.shift();
+        if (sigPool.length) {
+          const entry = sigPool.shift();
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ url: entry.url, pooled: true }));
+          return;
+        }
       }
       const signed = await mintSignedUrl(url, method, body);
       res.writeHead(200, { "content-type": "application/json" });
