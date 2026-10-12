@@ -24,6 +24,13 @@ const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 puppeteer.use(StealthPlugin());
 
 const PORT = parseInt(process.env.PORT || "8491", 10);
+
+// 🔴 进程级异常钩子：boot 后静默退出排查（本地实测踩过）
+process.on("unhandledRejection", (r) =>
+  console.error("[dola-signer] unhandledRejection:", r));
+process.on("uncaughtException", (e) =>
+  console.error("[dola-signer] uncaughtException:", e));
+process.on("exit", (code) => console.log(`[dola-signer] process exit code=${code}`));
 const CHROME_PATH = process.env.CHROME_PATH || "";
 const DOLA_COOKIE = process.env.DOLA_COOKIE || "";
 const PROXY = process.env.PROXY || "";
@@ -80,10 +87,9 @@ async function boot() {
     window.chrome = window.chrome || {};
     window.chrome.runtime = window.chrome.runtime || { connect: () => {} };
   });
-  await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-      "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
-  );
+  UA_USED = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+      "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
+  await page.setUserAgent(UA_USED);
   await page.setViewport({ width: 1280, height: 800 });
   if (DOLA_COOKIE) {
     const cookies = parseCookieString(DOLA_COOKIE);
@@ -215,6 +221,7 @@ async function mintSignedUrl(url, method, body) {
 }
 
 const pendingMints = [];
+let UA_USED = "";
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -283,7 +290,70 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ ok: !!browser, page_ready: pageReady }));
       return;
     }
-    if (req.method === "POST" && req.url === "/sign") {
+    if (req.method === "GET" && req.url === "/pageinfo") {
+    page.cookies("https://www.dola.com").then((cookies) => {
+      const ms = (cookies.find((c) => c.name === "msToken") || {}).value || "";
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ msToken: ms, ua: UA_USED || "", cookie_names: cookies.map((c) => c.name) }));
+    }).catch((e) => {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+    });
+    return;
+  }
+
+  // 🔴 页面真发：真 Chrome TLS + 真指纹 + 页面 cookie 原生请求（绕 JA3/TLS 检测）
+  //    {cookie, url(已带 a_bogus), body} → 注入 cookie → 页面 fetch 读 SSE 头部 → 返回文本
+  if (req.method === "POST" && req.url === "/send") {
+    const raw = await readBody(req);
+    const { cookie, url: sendUrl, body: sendBody } = JSON.parse(raw || "{}");
+    if (!sendUrl || !sendBody) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "url/body required" }));
+      return;
+    }
+    // 注入 cookie（解析 kv 对，仅覆盖发送所需会话）
+    if (cookie) {
+      const pairs = cookie.split(";").map((p) => p.trim()).filter(Boolean)
+        .map((p) => {
+          const i = p.indexOf("=");
+          return { name: p.slice(0, i), value: p.slice(i + 1) };
+        })
+        .map((c) => ({ ...c, domain: ".dola.com", path: "/" }));
+      await page.setCookie(...pairs).catch(() => {});
+    }
+    const text = await page.evaluate(async (u, b) => {
+      try {
+        const r = await fetch(u, {
+          method: "POST", body: b, credentials: "include",
+          headers: { "content-type": "application/json; encoding=utf-8" },
+        });
+        const ct = r.headers.get("content-type") || "";
+        if (!ct.includes("event-stream")) {
+          return "HTTP " + r.status + " " + (await r.text()).slice(0, 200);
+        }
+        const reader = r.body.getReader();
+        const dec = new TextDecoder();
+        let out = "";
+        const deadline = Date.now() + 20000;   // 读 SSE 头部（ACK 或错误码足够）
+        while (Date.now() < deadline && out.length < 4096) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          out += dec.decode(value, { stream: true });
+          if (out.includes("STREAM_ERROR") || out.includes("SSE_ACK")) break;
+        }
+        try { reader.cancel(); } catch {}
+        return out.slice(0, 4096);
+      } catch (e) {
+        return "FETCH_ERR " + e.message;
+      }
+    }, sendUrl, sendBody);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ sse_head: text }));
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/sign") {
       const raw = await readBody(req);
       const { url, method = "POST", body = "" } = JSON.parse(raw || "{}");
       if (!url || !url.startsWith("https://www.dola.com/")) {
