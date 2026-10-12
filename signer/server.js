@@ -216,16 +216,23 @@ function readBody(req) {
   });
 }
 
-// 🔴 周期金丝雀保活：mssdk 会话 ~30 分钟过期，每 4 分钟验一次，哑了后台自愈
-const KEEPALIVE_MS = 4 * 60 * 1000;
+// 🔴 周期金丝雀保活：mssdk 会话 ~30 分钟过期，每 10 分钟验一次；
+//    失败先 60s 后重试一次（瞬时抖动不 reload），连续两次失败才 reload
+//    （频繁 reload 反而触发上游会话清除，实测踩过）
+const KEEPALIVE_MS = 10 * 60 * 1000;
+let keepaliveFails = 0;
 let keepaliveTimer = setInterval(async () => {
   if (!pageReady) return;
   if (pendingMints.some((p) => !p.done)) return; // 🔴 有真实铸签在途，避免同 prefix 交叉匹配
   try {
     await mintOnce("https://www.dola.com/chat/completion?aid=495671&keepalive=1", "POST", "{}");
+    keepaliveFails = 0;
   } catch (e) {
-    console.log("[dola-signer] keepalive mint failed -> reloading:", e.message);
-    try { await reloadPage(); } catch (e2) { console.log("[dola-signer] reload failed:", e2.message); }
+    keepaliveFails += 1;
+    console.log(`[dola-signer] keepalive fail #${keepaliveFails}:`, e.message);
+    if (keepaliveFails < 2) return; // 第一次失败：等下轮（10min 后）再判，不急着 reload
+    try { await reloadPage(); keepaliveFails = 0; }
+    catch (e2) { console.log("[dola-signer] reload failed:", e2.message); }
   }
 }, KEEPALIVE_MS);
 keepaliveTimer.unref();
