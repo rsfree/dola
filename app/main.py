@@ -407,8 +407,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _bearer(request)
         reg = IMAGE_MODELS.get(req.model)
         if not reg:
-            raise InvalidParameterError(f"未知图像模型 {req.model}；"
-                                        f"可用：{sorted(IMAGE_MODELS)}")
+            # 🔴 兜底：未知图像模型名降级 seedream 4.5
+            reg = IMAGE_MODELS["dola-seedream-4.5"]
         ap: dict[str, Any] = {"input_box_content": {
             "user_input_content": req.prompt,
             "reply_message_format": "生成图片：%s"}}
@@ -436,7 +436,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         fp = _fp(request)
         reg = IMAGE_MODELS.get(req.model)
         if not reg:
-            raise InvalidParameterError(f"未知图像模型 {req.model}")
+            # 🔴 兜底：未知图像模型名降级 seedream 4.5
+            reg = IMAGE_MODELS["dola-seedream-4.5"]
         task_id = store.create("image", fp, req.prompt, req.model)
         def _run() -> None:
             try:
@@ -501,8 +502,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         fp = _fp(request)
         reg = VIDEO_MODELS.get(req.model)
         if not reg:
-            raise InvalidParameterError(f"未知视频模型 {req.model}；"
-                                        f"可用：{sorted(VIDEO_MODELS)}")
+            # 🔴 兜底：未知/未登记的视频模型名一律降级 seedance_v2.5，不报错
+            reg = VIDEO_MODELS["dola-seedance-2-5"]
         task_id = store.create("video", fp, req.prompt, req.model)
         ap = {"model": reg["ability_model"], "duration": req.duration,
               "input_box_content": {"user_input_content": req.prompt,
