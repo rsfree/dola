@@ -14,6 +14,8 @@
 """
 from __future__ import annotations
 
+import hashlib
+
 import json
 import os
 import threading
@@ -49,12 +51,21 @@ class Account:
 
     def client(self, device_id: str = "", web_id: str = "",
                nodes=None) -> DolaClient:
-        """每账号一个常驻客户端。出口解析优先级：直配 proxy > 绑定节点 > 直连。"""
+        """每账号一个常驻客户端。出口解析优先级：直配 proxy > 绑定节点 > 直连。
+
+        🔴 device_id/web_id 按账号名哈希派生（稳定且独立）：多账号共用同一设备
+        指纹会被 shark 按 device_id+IP 限流（710022002，实测踩过）——入参值仅作
+        兜底，账号身份优先。
+        """
         if self._client is None:
             proxy = self.proxy or (nodes.resolve_proxy(self.node_id, self.name)
                                    if nodes is not None else "")
-            self._client = DolaClient(self.cookie, device_id=device_id,
-                                      web_id=web_id, proxy=proxy or None)
+            # 每号独立设备指纹（名字哈希 → 两个 16 位十进制数）
+            h = hashlib.md5(f"dola:{self.name}".encode()).hexdigest()
+            dev = str(int(h[:16], 16))[:19]
+            wid = str(int(h[16:], 16))[:19]
+            self._client = DolaClient(self.cookie, device_id=dev or device_id,
+                                      web_id=wid or web_id, proxy=proxy or None)
         return self._client
 
     def snapshot(self, node_name: str = "") -> dict[str, Any]:
