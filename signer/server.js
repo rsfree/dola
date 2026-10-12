@@ -76,8 +76,11 @@ async function boot() {
   if (PROXY) args.push(`--proxy-server=${PROXY}`);
   browser = await puppeteer.launch({
     executablePath: CHROME_PATH,
-    headless: "new",
+    headless: process.env.HEADLESS === "0" ? false : "new",
     args,
+    // 🔴 去掉 puppeteer 默认自动化开关（mssdk 检测点；navigator.webdriver 已补丁但
+    //    --enable-automation 开关本身是另一路信号）
+    ignoreDefaultArgs: ["--enable-automation", "--enable-blink-features=AutomationControlled"],
   });
   page = await browser.newPage();
   // 反检测：覆写 navigator.webdriver
@@ -340,10 +343,10 @@ const server = http.createServer(async (req, res) => {
           const { done, value } = await reader.read();
           if (done) break;
           out += dec.decode(value, { stream: true });
-          if (out.includes("STREAM_ERROR") || out.includes("SSE_ACK")) break;
+          if (out.includes("STREAM_ERROR") || out.includes("SSE_ACK") || out.includes("SSE_REPLY_END")) break;
         }
         try { reader.cancel(); } catch {}
-        return out.slice(0, 4096);
+        return out.slice(0, 16384);
       } catch (e) {
         return "FETCH_ERR " + e.message;
       }
