@@ -133,10 +133,6 @@ async function hookAlive() {
 }
 
 async function mintOnce(url, method, body) {
-    if (!(await hookAlive())) {
-      console.log("[dola-signer] hook dead (mssdk session expired) -> reload");
-      await reloadPage();
-    }
   const u = new URL(url);
   const urlPrefix = `${u.origin}${u.pathname}`;
   const pending = { urlPrefix, done: false, signedUrl: null, resolve: null };
@@ -164,17 +160,33 @@ async function mintOnce(url, method, body) {
   await p;
   if (pendingMints.includes(pending))
     pendingMints.splice(pendingMints.indexOf(pending), 1);
-  return pending.signedUrl;
+  const out = pending.signedUrl;
+  // 🔴 会话过期时 fetch 未被 hook ⇒ 拦截器抓到裸 URL（无 a_bogus）。
+  //    必须视为失败抛错，上层 mintSignedUrl 才会 reload 自愈。
+  if (!out || !out.includes("a_bogus=")) {
+    throw new Error("mint result missing a_bogus (mssdk session dead)");
+  }
+  return out;
 }
 
 /** 页面老化自愈：SDK 长时间不开口 ⇒ 刷新页面重新加载 mssdk。 */
 async function reloadPage() {
-  await page.evaluate(() => { window.__rawFetch = window.__rawFetch || window.fetch; }).catch(() => {});
   console.log("[dola-signer] page stale -> reloading");
   pageReady = false;
   await page.goto(PAGE_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+  // 🔴 金丝雀等 hook：mssdk 初始化要数分钟，等到真出 a_bogus 才算 ready
+  const deadline = Date.now() + 8 * 60 * 1000;
+  let ready = false;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 15000));
+    try {
+      const u = await mintOnce("https://www.dola.com/chat/completion?aid=495671&canary=1", "POST", "{}");
+      ready = !!u;
+      break;
+    } catch { /* 还没就绪，继续等 */ }
+  }
   pageReady = true;
-  console.log("[dola-signer] page reloaded");
+  console.log(`[dola-signer] page reloaded, canary ${ready ? "ok" : "TIMEOUT (8min)"}`);
 }
 
 /** 页面内发起 fetch 触发 SDK 签名；等拦截器抓到签名 URL。
@@ -201,6 +213,20 @@ function readBody(req) {
     req.on("error", reject);
   });
 }
+
+// 🔴 周期金丝雀保活：mssdk 会话 ~30 分钟过期，每 4 分钟验一次，哑了后台自愈
+const KEEPALIVE_MS = 4 * 60 * 1000;
+let keepaliveTimer = setInterval(async () => {
+  if (!pageReady) return;
+  if (pendingMints.some((p) => !p.done)) return; // 🔴 有真实铸签在途，避免同 prefix 交叉匹配
+  try {
+    await mintOnce("https://www.dola.com/chat/completion?aid=495671&keepalive=1", "POST", "{}");
+  } catch (e) {
+    console.log("[dola-signer] keepalive mint failed -> reloading:", e.message);
+    try { await reloadPage(); } catch (e2) { console.log("[dola-signer] reload failed:", e2.message); }
+  }
+}, KEEPALIVE_MS);
+keepaliveTimer.unref();
 
 const server = http.createServer(async (req, res) => {
   try {
