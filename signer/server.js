@@ -108,16 +108,18 @@ async function boot() {
   });
   await page.goto(PAGE_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
 
-    // 等 mssdk SDK hook 就绪
-    try {
-      await page.waitForFunction(
-        () => window.byted_acrawler && typeof window.fetch === "function" && window.fetch.toString().length > 500,
-        { timeout: 300000, polling: 5000 }
-      );
-      console.log("[dola-signer] mssdk hook ready");
-    } catch {
-      console.log("[dola-signer] mssdk hook timeout, continuing anyway");
+    // 🔴 金丝雀等 hook：mssdk 初始化要数分钟，等真出 a_bogus 才置 ready（上限 8 分钟）
+    const deadline = Date.now() + 8 * 60 * 1000;
+    let canaryOk = false;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 15000));
+      try {
+        await mintOnce("https://www.dola.com/chat/completion?aid=495671&bootcanary=1", "POST", "{}");
+        canaryOk = true;
+        break;
+      } catch { /* 未就绪继续等 */ }
     }
+    console.log(`[dola-signer] boot canary ${canaryOk ? "ok" : "TIMEOUT (8min)"}`);
   pageReady = true;
 }
 
@@ -256,17 +258,16 @@ const server = http.createServer(async (req, res) => {
 });
 
 if (require.main === module) {
-  boot()
-    .then(() => {
-      server.listen(PORT, "0.0.0.0", () =>
-        console.log(`[dola-signer] ready on 127.0.0.1:${PORT}`)
-      );
-    })
-    .catch((e) => {
-      bootError = e;
-      console.error("[dola-signer] boot failed:", e);
-      process.exit(1);
-    });
+  // 🔴 先 listen 再 boot：HTTP 启动即达（page_ready=false 期间 /sign 快速失败），
+  //    否则 boot 的金丝雀等待期（可达数分钟）连接被拒
+  server.listen(PORT, "0.0.0.0", () =>
+    console.log(`[dola-signer] listening on ${PORT} (page booting...)`)
+  );
+  boot().catch((e) => {
+    bootError = e;
+    console.error("[dola-signer] boot failed:", e);
+    process.exit(1);
+  });
 }
 
 module.exports = { boot, mintSignedUrl, _server: server };
